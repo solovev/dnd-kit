@@ -38,6 +38,7 @@ import {coordinateGetter as multipleContainersCoordinateGetter} from './multiple
 import {Item, Container, ContainerProps} from '../../components';
 
 import {createRange} from '../../utilities';
+import {collisionDetectionVertical} from './collisionDetectionVertical';
 
 export default {
   title: 'Presets/Sortable/Multiple Containers',
@@ -100,6 +101,81 @@ function DroppableContainer({
       {...props}
     >
       {children}
+    </Container>
+  );
+}
+
+function DummyContainer({
+  columns = 1,
+  disabled,
+  id,
+  items,
+  style,
+  isActive,
+  ...props
+}: Omit<ContainerProps, 'children'> & {
+  disabled?: boolean;
+  id: UniqueIdentifier;
+  items: UniqueIdentifier[];
+  style?: React.CSSProperties;
+  isActive: boolean;
+}) {
+  const {
+    active,
+    attributes,
+    isDragging,
+    listeners,
+    over,
+    rect,
+    setNodeRef,
+    transition,
+    transform,
+  } = useSortable({
+    id,
+    data: {
+      type: 'container',
+      children: items,
+    },
+    animateLayoutChanges,
+    resizeObserverConfig: {
+      updateMeasurementsFor: [],
+    },
+  });
+  const isOverContainer = over
+    ? (id === over.id && active?.data.current?.type !== 'container') ||
+      items.includes(over.id)
+    : false;
+
+  style = {
+    ...style,
+    transition,
+    transform: CSS.Translate.toString(transform),
+    opacity: isDragging ? 0.5 : undefined,
+    minHeight: '75px',
+    margin: 0,
+  };
+
+  if (!isActive) {
+    Object.assign(style, {
+      minHeight: '0',
+      height: 0,
+    });
+  }
+
+  return (
+    <Container
+      ref={disabled ? undefined : setNodeRef}
+      placeholder={true}
+      style={style}
+      hover={isOverContainer}
+      handleProps={{
+        ...attributes,
+        ...listeners,
+      }}
+      columns={columns}
+      {...props}
+    >
+      Create new container
     </Container>
   );
 }
@@ -176,6 +252,7 @@ export function MultipleContainers({
         D: createRange(itemCount, (index) => `D${index + 1}`),
       }
   );
+  const [activeDummy, setActiveDummy] = useState<UniqueIdentifier | null>(null);
   const [containers, setContainers] = useState(
     Object.keys(items) as UniqueIdentifier[]
   );
@@ -183,6 +260,39 @@ export function MultipleContainers({
   const lastOverId = useRef<UniqueIdentifier | null>(null);
   const recentlyMovedToNewContainer = useRef(false);
   const isSortingContainer = activeId ? containers.includes(activeId) : false;
+
+  const detectCollisionsWithDummies: CollisionDetection = useCallback(
+    (args) => {
+      const droppableContainers = args.droppableContainers.filter(
+        (container) => {
+          return String(container.id).startsWith('dummy');
+        }
+      );
+
+      // First, find the intersection
+      const intersectedDummies = rectIntersection({
+        ...args,
+        droppableContainers,
+      });
+
+      if (intersectedDummies.length > 0) {
+        const [intersectedDummy] = intersectedDummies;
+        return [{id: intersectedDummy.id}];
+      }
+
+      // If there are no intersections, find the nearest one
+      const nearDummies = collisionDetectionVertical({
+        ...args,
+        droppableContainers,
+      });
+      if (nearDummies.length === 0) {
+        return [];
+      }
+      const [nearestDummy] = nearDummies;
+      return [{id: nearestDummy.id}];
+    },
+    []
+  );
 
   /**
    * Custom collision detection strategy optimized for multiple containers
@@ -238,7 +348,7 @@ export function MultipleContainers({
 
         lastOverId.current = overId;
 
-        return [{id: overId}];
+        return [{id: overId}, ...detectCollisionsWithDummies(args)];
       }
 
       // When a draggable item moves to a new container, the layout may shift
@@ -311,6 +421,13 @@ export function MultipleContainers({
       onDragStart={({active}) => {
         setActiveId(active.id);
         setClonedItems(items);
+      }}
+      onDragMove={({active, collisions}) => {
+        if (active.id in items || !collisions || collisions.length <= 1) {
+          setActiveDummy(null);
+          return;
+        }
+        setActiveDummy(collisions[1].id);
       }}
       onDragOver={({active, over}) => {
         const overId = over?.id;
@@ -421,6 +538,29 @@ export function MultipleContainers({
           return;
         }
 
+        if (overId.toString().startsWith('dummy-')) {
+          const index = +overId.toString().split('-')[1];
+          const newContainerId = getNextContainerId();
+
+          unstable_batchedUpdates(() => {
+            setContainers((containers) => [
+              ...containers.slice(0, index),
+              newContainerId,
+              ...containers.slice(index, containers.length),
+            ]);
+            setItems((items) => ({
+              ...items,
+              [activeContainer]: items[activeContainer].filter(
+                (id) => id !== activeId
+              ),
+              [newContainerId]: [active.id],
+            }));
+            setActiveId(null);
+            setActiveDummy(null);
+          });
+          return;
+        }
+
         const overContainer = findContainer(overId);
 
         if (overContainer) {
@@ -461,37 +601,48 @@ export function MultipleContainers({
               : horizontalListSortingStrategy
           }
         >
-          {containers.map((containerId) => (
-            <DroppableContainer
-              key={containerId}
-              id={containerId}
-              label={minimal ? undefined : `Column ${containerId}`}
-              columns={columns}
-              items={items[containerId]}
-              scrollable={scrollable}
-              style={containerStyle}
-              unstyled={minimal}
-              onRemove={() => handleRemove(containerId)}
-            >
-              <SortableContext items={items[containerId]} strategy={strategy}>
-                {items[containerId].map((value, index) => {
-                  return (
-                    <SortableItem
-                      disabled={isSortingContainer}
-                      key={value}
-                      id={value}
-                      index={index}
-                      handle={handle}
-                      style={getItemStyles}
-                      wrapperStyle={wrapperStyle}
-                      renderItem={renderItem}
-                      containerId={containerId}
-                      getIndex={getIndex}
-                    />
-                  );
-                })}
-              </SortableContext>
-            </DroppableContainer>
+          <DummyContainer
+            id="dummy-0"
+            isActive={activeDummy === 'dummy-0'}
+            items={[]}
+          />
+          {containers.map((containerId, index) => (
+            <React.Fragment key={containerId}>
+              <DroppableContainer
+                id={containerId}
+                label={minimal ? undefined : `Column ${containerId}`}
+                columns={columns}
+                items={items[containerId]}
+                scrollable={scrollable}
+                style={containerStyle}
+                unstyled={minimal}
+                onRemove={() => handleRemove(containerId)}
+              >
+                <SortableContext items={items[containerId]} strategy={strategy}>
+                  {items[containerId].map((value, index) => {
+                    return (
+                      <SortableItem
+                        disabled={isSortingContainer}
+                        key={value}
+                        id={value}
+                        index={index}
+                        handle={handle}
+                        style={getItemStyles}
+                        wrapperStyle={wrapperStyle}
+                        renderItem={renderItem}
+                        containerId={containerId}
+                        getIndex={getIndex}
+                      />
+                    );
+                  })}
+                </SortableContext>
+              </DroppableContainer>
+              <DummyContainer
+                id={`dummy-${index + 1}`}
+                isActive={activeDummy === `dummy-${index + 1}`}
+                items={[]}
+              />
+            </React.Fragment>
           ))}
           {minimal ? undefined : (
             <DroppableContainer
